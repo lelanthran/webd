@@ -4,11 +4,43 @@
 #include <string.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <time.h>
+#include <signal.h>
+#include <errno.h>
 
 #include "webd.h"
-#include "webd_log.h"
 #include "amq.h"
 #include "netcode_tcp.h"
+#include "netcode_util.h"
+
+static FILE *g_logfile = NULL;
+static volatile sig_atomic_t g_exit_flag = 0;
+
+static void sighandler (int n)
+{
+   if (n==SIGINT)
+      g_exit_flag = 1;
+}
+
+static enum amq_worker_result_t error_logger (const struct amq_worker_t *self,
+                                              void *mesg, size_t mesg_len, void *cdata)
+{
+   // NOTE: Reusing the mesg_len field as a line number
+   (void)self;
+   (void)mesg_len;
+   (void)cdata;
+   struct amq_error_t *errobj = mesg;
+
+   if (!g_logfile)
+      g_logfile = stderr;
+
+   // TODO: Move the libx timer library to github, use xtimer.
+   fprintf (g_logfile, "%" PRIu64 " : %s", time (NULL), errobj->message);
+
+   amq_error_del (errobj);
+
+   return amq_worker_result_CONTINUE;
+}
 
 /* *****************************************************************
  * A more robust command-line handling function than I normally use.
@@ -119,35 +151,92 @@ static void print_help_msg (void)
 
 int main (int argc, char **argv)
 {
+   int retval = EXIT_FAILURE;
+
    const char *opt_listen_port = cline_getopt (argc, argv, "listen-port", 0);
    const char *opt_log_fname = cline_getopt (argc, argv, "logfile", 0);
    const char *opt_help = cline_getopt (argc, argv, "help", 0);
 
-   uint64_t listen_port = 8080;
+   size_t listen_port = 8080;
+   int listenfd = -1;
+   int acceptfd = -1;
 
+   char *remote_addr = NULL;
+   uint16_t remote_port = 0;
+
+   // Install a signal handler
+   signal (SIGINT, sighandler);
+
+   // Initialise AMQ and the error logging system
+   if (opt_log_fname) {
+      if (!(g_logfile = fopen (opt_log_fname, "w"))) {
+         fprintf (stderr, "Failed to open [%s] for writing: %m\n", opt_log_fname);
+         return retval;
+      }
+   }
    amq_lib_init ();
+   amq_consumer_create (AMQ_QUEUE_ERROR, "ErrorLogger", error_logger, "Created by " __FILE__);
+   AMQ_ERROR_POST (0, "Started new instance of [%s]\n", argv[0]);
 
-   webd_log_init (opt_log_fname);
-
+   // Parse the command line arguments
    if (!opt_listen_port) {
-      WEBD_LOG ("Did not specify port to listen on with '--listen-port', using default\n");
+      AMQ_ERROR_POST (-1, "Did not specify listening port with '--listen-port', using default\n");
    } else {
-      if ((sscanf (opt_listen_port, "%" PRIu64, &listen_port))!=1) {
-         WEBD_LOG ("Cannot listen on port [%s]: invalid port number\n", opt_listen_port);
-         return 1;
+      if ((sscanf (opt_listen_port, "%zu", &listen_port))!=1) {
+         AMQ_ERROR_POST (-1, "Cannot listen on port [%s]: invalid port number\n", opt_listen_port);
+         goto cleanup;
       }
    }
 
    if (opt_help) {
       print_help_msg ();
-      return EXIT_FAILURE;
+      goto cleanup;
    }
 
-   // TODO: Log the program parameters here.
-   printf ("TODO: create the web daemon\n");
 
-   webd_log_shutdown ();
+   // Some startup information
+   AMQ_ERROR_POST (0, "Listening on port [%zu]\n", listen_port);
 
+   // Start the TCP server
+   netcode_util_clear_errno ();
+   if ((listenfd = netcode_tcp_server (listen_port))<0) {
+      AMQ_ERROR_POST (-1, "Failed to establish listening socket on %zu: %m\n", listen_port);
+      goto cleanup;
+   }
 
-   return EXIT_SUCCESS;
+   // Recieve and process all the incoming connections
+   while (g_exit_flag==0) {
+      free (remote_addr);
+      remote_addr = NULL;
+      remote_port = 0;
+      netcode_util_clear_errno ();
+      acceptfd = netcode_tcp_accept (listenfd, 1, &remote_addr, &remote_port);
+
+      if (acceptfd == 0)
+         continue;
+      if (acceptfd < 0) {
+         printf ("%i: %s\n", acceptfd, netcode_util_strerror (netcode_util_errno ()));
+      }
+
+      // TODO: Here is where we must post acceptfd, remote_addr and remote_port to the
+      // request-worker queues.
+
+      shutdown (acceptfd, SHUT_RDWR);
+      close (acceptfd);
+   }
+
+   // Done
+   retval = EXIT_SUCCESS;
+
+cleanup:
+
+   sleep (1);
+   // amq_worker_sigset ("ErrorLogger", AMQ_SIGNAL_TERMINATE);
+   amq_lib_destroy ();
+
+   fclose (g_logfile);
+
+   free (remote_addr);
+
+   return retval;
 }
