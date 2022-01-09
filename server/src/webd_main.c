@@ -6,6 +6,7 @@
 #include <inttypes.h>
 
 #include "webd.h"
+#include "webd_log.h"
 #include "netcode_tcp.h"
 
 /* *****************************************************************
@@ -109,7 +110,7 @@ static const char *cline_getopt (int argc, char **argv,
    return NULL;
 }
 
-static print_help_msg (void)
+static void print_help_msg (void)
 {
    printf ("TODO: Some help text\n");
 }
@@ -122,13 +123,14 @@ int main (int argc, char **argv)
    const char *opt_help = cline_getopt (argc, argv, "help", 0);
 
    uint64_t listen_port = 8080;
-   FILE *logfile = stdout;
+
+   webd_log_init (opt_log_fname);
 
    if (!opt_listen_port) {
-      fprintf (stderr, "Did not specify port to listen on with '--listen-port', using default\n");
+      WEBD_LOG ("Did not specify port to listen on with '--listen-port', using default\n");
    } else {
       if ((sscanf (opt_listen_port, "%" PRIu64, &listen_port))!=1) {
-         fprintf (stderr, "Cannot listen on port [%s]: invalid port number\n", opt_listen_port);
+         WEBD_LOG ("Cannot listen on port [%s]: invalid port number\n", opt_listen_port);
          return 1;
       }
    }
@@ -140,5 +142,9 @@ int main (int argc, char **argv)
 
    // TODO: Log the program parameters here.
    printf ("TODO: create the web daemon\n");
+
+   webd_log_shutdown ();
+
+
    return EXIT_SUCCESS;
 }
