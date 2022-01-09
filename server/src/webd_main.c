@@ -7,6 +7,7 @@
 
 #include "webd.h"
 #include "webd_log.h"
+#include "amq.h"
 #include "netcode_tcp.h"
 
 /* *****************************************************************
@@ -123,6 +124,8 @@ int main (int argc, char **argv)
    const char *opt_help = cline_getopt (argc, argv, "help", 0);
 
    uint64_t listen_port = 8080;
+
+   amq_lib_init ();
 
    webd_log_init (opt_log_fname);
 
